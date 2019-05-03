@@ -1,0 +1,942 @@
+---
+title: "ITEC 621 - Predictive Project - Airbnb"
+author: "Antal"
+date: "February 21, 2019"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options}
+knitr::opts_chunk$set(echo=T, warning=F, message=F)
+```
+
+```{r}
+## Cleaning data for training for log_price predictions.
+train <-read.csv("train.csv", header = T, sep = ",", na.strings=c("","NA"))
+
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(perturb)
+library(car)
+library(lmtest)
+library(ISLR)
+library(boot)
+library(tree)
+library(stats)
+install.packages("jtools")
+library(jtools)
+
+train <- train[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'bed_type',
+  'cancellation_policy',
+  'cleaning_fee',
+  'city',
+  'first_review',
+  'host_has_profile_pic',
+  'host_identity_verified',
+  'host_response_rate',
+  'host_since',
+  'instant_bookable',
+  'last_review',
+  'number_of_reviews',
+  'review_scores_rating',
+  'bedrooms',
+  'beds'
+)]
+
+##Data Cleaning!
+train$first_review <- as.Date(train$first_review, format = '%Y-%m-%d')
+train$host_since <- as.Date(train$host_since, format = '%Y-%m-%d')
+train$last_review <- as.Date(train$last_review, format = '%Y-%m-%d')
+
+which(colnames(train)=="host_response_rate" )
+colnames(train)[13] <- "host_response_rate_percent"
+percent_num <- as.numeric(sub("%", "", train$host_response_rate_percent))
+head(percent_num)
+train$host_response_rate_percent <- percent_num
+
+# Creating a correlation matrix
+trainNo <- train[complete.cases(train), ]
+numVar <- which(sapply(trainNo, is.numeric))
+dataset_num <- trainNo[, numVar]
+data_cor <- cor(dataset_num, use = 'complete.obs')
+corrplot(data_cor)
+
+# OLS model of the complete dataset for log_price.
+lm.model <- lm(log_price ~. , data = trainNo)
+summary(lm.model)
+```
+
+```{r}
+## Checking if cities are significant with predictor log_price 
+zip.cost <-glm(city ~ log_price, family=binomial(link="logit"), data=trainNo) 
+summary(zip.cost)
+# Confirms that city has a significant effect on price
+```
+
+
+```{r}
+## Creating models for San Francisco
+SF <- train %>%
+  filter(city == "SF")
+# Removing rows with NA and city column
+SFNo <- SF[complete.cases(SF), ] %>%
+  select(-city)
+
+## OLS Assumptions
+## Assumption 1. Y is continuous
+hist(SFNo$log_price)
+# The bar plot seems to be normally distributed.
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(SFNo$log_price, main=" Price SF")
+qqline(SFNo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+SFLogLinearModel <- lm(log_price ~ ., data = SFNo)
+summary(SFLogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(SFLogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+# the_plot <- ggpairs(data.frame(SFNo), cardinality_threshold = 35, showStrips = TRUE)
+plot(SFLogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(SFLogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 2.0418.
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(SFNo$log_price ~ ., data = SFNo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(SFLogLinearModel, which = 1)
+# However, the plot shows there is not much visual hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+SFNo$property_type <- droplevels(SFNo)$property_type
+SFNo$room_type <- droplevels(SFNo)$room_type
+SFNo$bed_type <- droplevels(SFNo)$bed_type
+SFNo$host_has_profile_pic <- droplevels(SFNo)$host_has_profile_pic
+SFNo$host_identity_verified <- droplevels(SFNo)$host_identity_verified
+SFNo$instant_bookable <- droplevels(SFNo)$instant_bookable
+table(SFNo$property_type)
+
+# Combining all the factor that have degree of freedom less than 10
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Tent"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Boat"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Bungalow"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Cabin"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Camper/RV"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Castle"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Cave"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Dorm"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Hostel"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Serviced apartment"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Treehouse"] <- "Other"
+levels(SFNo$property_type)[levels(SFNo$property_type)=="Villa"] <- "Other"
+levels(SFNo$cancellation_policy)[levels(SFNo$cancellation_policy)=="super_strict_60"] <- "super_strict_30"
+```
+```{r}
+## OLS model for all cities.
+set.seed(1)
+SF.train <- sample(nrow(SFNo), 0.7*nrow(SFNo))
+SFLogLinearModel <- lm(log_price ~ ., data = SFNo[SF.train,])
+summary(SFLogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+SF.null <- lm(log_price ~ 1, data = SFNo[SF.train,])
+SF.full <- lm(log_price ~ ., data = SFNo[SF.train,])
+SF.stepwise <- step(SF.full, scope = list(lower = SF.full, upper = SF.full), direction = 'both', test = 'F')
+summary(SF.stepwise)
+```
+```{r}
+SF.reduced <- SFNo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'cancellation_policy',
+  'first_review',
+  'host_identity_verified',
+  'last_review',
+  'number_of_reviews',
+  'review_scores_rating',
+  'bedrooms',
+  'beds'
+)]
+# Running OLS with the reduced model with only significant predictors.
+SF.reduced.model <- lm(log_price ~., data = SF.reduced[SF.train,])
+summary(SF.reduced.model)
+```
+```{r}
+SF.reduced.mse <-  mean((SF.reduced$log_price-predict(SF.reduced.model, SF.reduced))[-SF.train]^2)
+print(paste("MSE Reduced OLS = ", SF.reduced.mse), digits=5)
+# Talk about which variables are significant variables and what does the sign of the coefficient represents!!
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = SF.reduced)
+cv.10K <- cv.glm(SF.reduced, glm.fit, K=10)
+print(paste("10FCV MSE OLS = ", cv.10K$delta[1]), digits=5)
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(SFLogLinearModel))~fitted(SFLogLinearModel)))^2
+SF.wls <- lm(log_price ~ ., data = SFNo[SF.train,], weights=1/wts)
+summary(SF.wls)
+```
+```{r}
+MSE.wls <- mean((SFNo$log_price-predict(SF.wls, SFNo))[-SF.train]^2)
+print(paste("MSE WLS = ", MSE.wls))
+```
+```{r}
+# Regression Tree
+tree.SF <- tree(log_price ~ ., data = SFNo[SF.train,])
+tree.SF
+summary(tree.SF)
+plot(tree.SF)
+text(tree.SF, pretty = 0)
+# Regression Tree splits the tree based on bedrooms and room_type!!
+tree.SF.pred <- predict(tree.SF, newdata = SFNo[-SF.train,])
+print(paste("MSE Regression Tree = ", mean((tree.SF.pred - SF.reduced$log_price[-SF.train])^2)))
+```
+
+```{r}
+## Creating models for District of Columbia
+DC <- train %>%
+  filter(city == "DC")
+# Removing rows with NA and city column
+DCNo <- DC[complete.cases(DC), ] %>%
+  select(-city)
+
+### OLS Assumptions
+## Assumption 1. Y is continuous
+hist(DCNo$log_price)
+# The bar plot seems to be normally distributed.
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(DCNo$log_price, main=" Price DC")
+qqline(DCNo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+DCLogLinearModel <- lm(log_price ~ ., data = DCNo)
+summary(DCLogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(DCLogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+plot(DCLogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(DCLogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 1.9772
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(DCNo$log_price ~ ., data = DCNo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(DCLogLinearModel, which = 1)
+# However, the plot shows there is not much visual hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+DCNo$property_type <- droplevels(DCNo)$property_type
+DCNo$room_type <- droplevels(DCNo)$room_type
+DCNo$bed_type <- droplevels(DCNo)$bed_type
+DCNo$host_has_profile_pic <- droplevels(DCNo)$host_has_profile_pic
+DCNo$host_identity_verified <- droplevels(DCNo)$host_identity_verified
+DCNo$instant_bookable <- droplevels(DCNo)$instant_bookable
+
+table(DCNo$property_type)
+# Combining all the factor that have degree of freedom less than 10
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Boat"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Bungalow"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Cabin"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Castle"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Guest suite"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Guesthouse"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Hostel"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="In-law"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Train"] <- "Other"
+levels(DCNo$property_type)[levels(DCNo$property_type)=="Serviced apartment"] <- "Other"
+```
+
+
+```{r}
+## OLS model for all cities.
+set.seed(1)
+DC.train <- sample(nrow(DCNo), 0.7*nrow(DCNo))
+DCLogLinearModel <- lm(log_price ~ ., data = DCNo[DC.train,])
+summary(DCLogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+DC.null <- lm(log_price ~ 1, data = DCNo[DC.train,])
+DC.full <- lm(log_price ~ ., data = DCNo[DC.train,])
+DC.stepwise <- step(DC.full, scope = list(lower = DC.full, upper = DC.full), direction = 'both', test = 'F')
+summary(DC.stepwise)
+```
+```{r}
+DC.reduced <- DCNo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'bed_type',
+  'cancellation_policy',
+  'cleaning_fee',
+  'first_review',
+  'host_response_rate_percent',
+  'last_review',
+  'number_of_reviews',
+  'review_scores_rating',
+  'bedrooms'
+)]
+# Running OLS with the reduced model with only significant predictors.
+DC.reduced.model <- lm(log_price ~., data = DC.reduced[DC.train,])
+summary(DC.reduced.model)
+```
+```{r}
+DC.reduced.mse <-  mean((DC.reduced$log_price-predict(DC.reduced.model, DC.reduced))[-DC.train]^2)
+DC.reduced.mse
+print(paste("MSE Reduced OLS = ", DC.reduced.mse), digits=5)
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = DC.reduced)
+cv.10K <- cv.glm(DC.reduced, glm.fit, K=10)
+print(paste("10FCV MSE OLS = ", cv.10K$delta[1]), digits=5)
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(DCLogLinearModel))~fitted(DCLogLinearModel)))^2
+DC.wls <- lm(log_price ~ ., data = DCNo[DC.train,], weights=1/wts)
+summary(DC.wls)
+```
+```{r}
+MSE.wls <- mean((DCNo$log_price-predict(DC.wls, DCNo))[-DC.train]^2)
+print(paste("MSE WLS = ", MSE.wls))
+```
+```{r}
+# Regression Tree
+tree.DC <- tree(log_price ~ ., data = DCNo[DC.train,])
+tree.DC
+summary(tree.DC)
+plot(tree.DC)
+text(tree.DC, pretty = 0)
+# Regression Tree splits the tree based on bedrooms and room_type!!
+tree.DC.pred <- predict(tree.DC, newdata = DCNo[-DC.train,])
+mean((tree.DC.pred - DC.reduced$log_price[-DC.train])^2)
+print(paste("MSE Regression Tree = ", mean(tree.SF.pred - mean(tree.DC.pred - DC.reduced$log_price[-DC.train])^2)))
+```
+```{r}
+## Creating models for New York City
+NYC <- train %>%
+  filter(city == "NYC")
+# Removing rows with NA and city column
+NYCNo <- NYC[complete.cases(NYC), ] %>%
+  select(-city)
+### OLS Assumptions
+## Assumption 1. Y is continuous
+hist(NYCNo$log_price)
+# The bar plot seems to be normally distributed.
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(NYCNo$log_price, main=" Price NYC")
+qqline(NYCNo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+NYCLogLinearModel <- lm(log_price ~ ., data = NYCNo)
+summary(NYCLogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(NYCLogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+plot(NYCLogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(NYCLogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 2.0249
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(NYCNo$log_price ~ ., data = NYCNo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(NYCLogLinearModel, which = 1)
+# However, the plot shows there is not much visual hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+NYCNo$property_type <- droplevels(NYCNo)$property_type
+NYCNo$host_has_profile_pic <- droplevels(NYCNo)$host_has_profile_pic
+NYCNo$host_identity_verified <- droplevels(NYCNo)$host_identity_verified
+NYCNo$cancellation_policy <- droplevels(NYCNo)$cancellation_policy
+
+table(NYCNo$property_type)
+# Combining all the factor that have degree of freedom less than 10
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Boat"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Boutique hotel"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Bungalow"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Cabin"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Chalet"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Castle"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Earth House"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="In-law"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Serviced apartment"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Vacation home"] <- "Other"
+levels(NYCNo$property_type)[levels(NYCNo$property_type)=="Yurt"] <- "Other"
+levels(NYCNo$cancellation_policy)[levels(NYCNo$cancellation_policy)=="super_strict_60"] <- "super_strict_30"
+```
+```{r}
+## OLS model for all cities.
+set.seed(1)
+NYC.train <- sample(nrow(NYCNo), 0.7*nrow(NYCNo))
+NYCLogLinearModel <- lm(log_price ~ ., data = NYCNo[NYC.train,])
+summary(NYCLogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+NYC.null <- lm(log_price ~ 1, data = NYCNo[NYC.train,])
+NYC.full <- lm(log_price ~ ., data = NYCNo[NYC.train,])
+NYC.stepwise <- step(NYC.full, scope = list(lower = NYC.full, upper = NYC.full), direction = 'both', test = 'F')
+summary(NYC.stepwise)
+```
+```{r}
+NYC.reduced <- NYCNo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'bed_type',
+  'cancellation_policy',
+  'first_review',
+  'host_has_profile_pic',
+  'host_since',
+  'last_review',
+  'number_of_reviews',
+  'review_scores_rating',
+  'bedrooms',
+  'beds'
+)]
+
+# Running OLS with the reduced model with only significant predictors.
+NYC.reduced.model <- lm(log_price ~., data = NYC.reduced[NYC.train,])
+summary(NYC.reduced.model)
+```
+```{r}
+NYC.reduced.mse <-  mean((NYC.reduced$log_price-predict(NYC.reduced.model, NYC.reduced))[-NYC.train]^2)
+print(paste("MSE Reduced OLS = ", NYC.reduced.mse), digits = 5)
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = NYC.reduced)
+cv.10K <- cv.glm(NYC.reduced, glm.fit, K=10)
+print(paste("CV MSE OLS = ", cv.10K$delta[1]), digits=5)
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(NYCLogLinearModel))~fitted(NYCLogLinearModel)))^2
+NYC.wls <- lm(log_price ~ ., data = NYCNo[NYC.train,], weights=1/wts)
+summary(NYC.wls)
+```
+```{r}
+MSE.wls <- mean((NYCNo$log_price-predict(NYC.wls, NYCNo))[-NYC.train]^2)
+print(paste("MSE WLS = ", MSE.wls), digits=5)
+```
+```{r}
+# Regression Tree
+tree.NYC <- tree(log_price ~ ., data = NYCNo[NYC.train,])
+tree.NYC
+summary(tree.NYC)
+plot(tree.NYC)
+text(tree.NYC, pretty = 0)
+# Regression Tree splits the tree based on room_type and bedrooms!!
+tree.NYC.pred <- predict(tree.NYC, newdata = NYCNo[-NYC.train,])
+print(paste("MSE Regression Tree = ", mean((tree.NYC.pred - NYC.reduced$log_price[-NYC.train])^2)), digits=5)
+```
+
+
+```{r}
+## Creating models for Boston
+Boston <- train %>%
+  filter(city == "Boston")
+# Removing rows with NA and city column
+BostonNo <- Boston[complete.cases(Boston), ] %>%
+  select(-city)
+### OLS Assumptions
+## Assumption 1. Y is continuous
+hist(BostonNo$log_price)
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(BostonNo$log_price, main=" Price Boston")
+qqline(BostonNo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+BostonLogLinearModel <- lm(log_price ~ ., data = BostonNo)
+summary(BostonLogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(BostonLogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+plot(BostonLogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(BostonLogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 2.0513
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(BostonNo$log_price ~ ., data = BostonNo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(BostonLogLinearModel, which = 1)
+# The plot shows there is some hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+BostonNo$property_type <- droplevels(BostonNo)$property_type
+BostonNo$host_has_profile_pic <- droplevels(BostonNo)$host_has_profile_pic
+BostonNo$host_identity_verified <- droplevels(BostonNo)$host_identity_verified
+BostonChicancellation_policy <- droplevels(BostonNo)$cancellation_policy
+
+table(BostonNo$property_type)
+# Combining all the factor that have degree of freedom less than 10
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Boat"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Boutique hotel"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Serviced apartment"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Dorm"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Guest suite"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Guesthouse"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Hostel"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="In-law"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Timeshare"] <- "Other"
+levels(BostonNo$property_type)[levels(BostonNo$property_type)=="Villa"] <- "Other"
+levels(BostonNo$cancellation_policy)[levels(BostonNo$cancellation_policy)=="super_strict_60"] <- "super_strict_30"
+```
+```{r}
+## OLS model for all cities.
+set.seed(1)
+Boston.train <- sample(nrow(BostonNo), 0.7*nrow(BostonNo))
+BostonLogLinearModel <- lm(log_price ~ ., data = BostonNo[Boston.train,])
+summary(BostonLogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+Boston.null <- lm(log_price ~ 1, data = BostonNo[Boston.train,])
+Boston.full <- lm(log_price ~ ., data = BostonNo[Boston.train,])
+Boston.stepwise <- step(Boston.full, scope = list(lower = Boston.full, upper = Boston.full), direction = 'both', test = 'F')
+summary(Boston.stepwise)
+```
+```{r}
+Boston.reduced <- BostonNo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'bed_type',
+  'cancellation_policy',
+  'cleaning_fee',
+  'instant_bookable',
+  'review_scores_rating',
+  'bedrooms',
+  'beds'
+)]
+
+# Running OLS with the reduced model with only significant predictors.
+Boston.reduced.model <- lm(log_price ~., data = Boston.reduced[Boston.train,])
+summary(Boston.reduced.model)
+```
+```{r}
+Boston.reduced.mse <-  mean((Boston.reduced$log_price-predict(Boston.reduced.model, Boston.reduced))[-Boston.train]^2)
+print(paste("MSE Reduced OLS = ", Boston.reduced.mse), digits=5)
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = Boston.reduced)
+cv.10K <- cv.glm(Boston.reduced, glm.fit, K=10)
+print(paste("CV MSE OLS = ", cv.10K$delta[1]), digits=5)
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(BostonLogLinearModel))~fitted(BostonLogLinearModel)))^2
+Boston.wls <- lm(log_price ~ ., data = BostonNo[Boston.train,], weights=1/wts)
+summary(Boston.wls)
+```
+```{r}
+MSE.wls <- mean((BostonNo$log_price-predict(Boston.wls, BostonNo))[-Boston.train]^2)
+print(paste("MSE WLS = ", MSE.wls), digits=5)
+```
+```{r}
+# Regression Tree
+tree.Boston <- tree(log_price ~ ., data = BostonNo[Boston.train,])
+tree.Boston
+summary(tree.Boston)
+plot(tree.Boston)
+text(tree.Boston, pretty = 0)
+# Regression Tree splits the tree based on room_type and bedrooms!!
+tree.Boston.pred <- predict(tree.Boston, newdata = BostonNo[-Boston.train,])
+print(paste("MSE Regression Tree = ", mean((tree.Boston.pred - Boston.reduced$log_price[-Boston.train])^2)), digits=5)
+```
+
+
+```{r}
+## Creating models for Chicago
+Chi <- train %>%
+  filter(city == "Chicago")
+# Removing rows with NA and city column
+ChiNo <- Chi[complete.cases(Chi), ] %>%
+  select(-city)
+
+### OLS Assumptions
+## Assumption 1. Y is continuous
+hist(ChiNo$log_price)
+# The bar plot seems to be normally distributed.
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(ChiNo$log_price, main=" Price Chi")
+qqline(ChiNo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+ChiLogLinearModel <- lm(log_price ~ ., data = ChiNo)
+summary(ChiLogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(ChiLogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+plot(ChiLogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(ChiLogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 2.0201
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(ChiNo$log_price ~ ., data = ChiNo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(ChiLogLinearModel, which = 1)
+# However, the plot shows there is not much visual hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+ChiNo$property_type <- droplevels(ChiNo)$property_type
+ChiNo$host_has_profile_pic <- droplevels(ChiNo)$host_has_profile_pic
+ChiNo$host_identity_verified <- droplevels(ChiNo)$host_identity_verified
+ChiNo$cancellation_policy <- droplevels(ChiNo)$cancellation_policy
+
+table(ChiNo$property_type)
+# Combining all the factor that have degree of freedom less than 10
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Boat"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Boutique hotel"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Bungalow"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Dorm"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Guest suite"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Guesthouse"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Hostel"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="In-law"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Vacation home"] <- "Other"
+levels(ChiNo$property_type)[levels(ChiNo$property_type)=="Villa"] <- "Other"
+levels(ChiNo$cancellation_policy)[levels(ChiNo$cancellation_policy)=="super_strict_60"] <- "super_strict_30"
+```
+```{r}
+## OLS model for all cities.
+set.seed(1)
+Chi.train <- sample(nrow(ChiNo), 0.7*nrow(ChiNo))
+ChiLogLinearModel <- lm(log_price ~ ., data = ChiNo[Chi.train,])
+summary(ChiLogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+Chi.null <- lm(log_price ~ 1, data = ChiNo[Chi.train,])
+Chi.full <- lm(log_price ~ ., data = ChiNo[Chi.train,])
+Chi.stepwise <- step(Chi.full, scope = list(lower = Chi.full, upper = Chi.full), direction = 'both', test = 'F')
+summary(Chi.stepwise)
+```
+```{r}
+Chi.reduced <- ChiNo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'bed_type',
+  'cancellation_policy',
+  'cleaning_fee',
+  'first_review',
+  'host_response_rate_percent',
+  'instant_bookable',
+  'last_review',
+  'number_of_reviews',
+  'review_scores_rating',
+  'bedrooms',
+  'beds'
+)]
+
+# Running OLS with the reduced model with only significant predictors.
+Chi.reduced.model <- lm(log_price ~., data = Chi.reduced[Chi.train,])
+summary(Chi.reduced.model)
+```
+```{r}
+Chi.reduced.mse <-  mean((Chi.reduced$log_price-predict(Chi.reduced.model, Chi.reduced))[-Chi.train]^2)
+print(paste("MSE Reduced OLS = ", Chi.reduced.mse), digits=5)
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = Chi.reduced)
+cv.10K <- cv.glm(Chi.reduced, glm.fit, K=10)
+print(paste("CV MSE OLS = ", cv.10K$delta[1]), digits=5)
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(ChiLogLinearModel))~fitted(ChiLogLinearModel)))^2
+Chi.wls <- lm(log_price ~ ., data = ChiNo[Chi.train,], weights=1/wts)
+summary(Chi.wls)
+```
+```{r}
+MSE.wls <- mean((ChiNo$log_price-predict(Chi.wls, ChiNo))[-Chi.train]^2)
+print(paste("MSE WLS = ", MSE.wls), digits=5)
+```
+```{r}
+# Regression Tree
+tree.Chi <- tree(log_price ~ ., data = ChiNo[Chi.train,])
+tree.Chi
+summary(tree.Chi)
+plot(tree.Chi)
+text(tree.Chi, pretty = 0)
+# Regression Tree splits the tree based on room_type and bedrooms!!
+tree.Chi.pred <- predict(tree.Chi, newdata = ChiNo[-Chi.train,])
+print(paste("MSE Regression Tree = ", mean((tree.Chi.pred - Chi.reduced$log_price[-Chi.train])^2)), digits=5)
+```
+
+
+```{r}
+## Creating models for Los Angeles
+LA <- train %>%
+  filter(city == "LA")
+# Removing rows with NA and city column
+LANo <- LA[complete.cases(LA), ] %>%
+  select(-city)
+
+### OLS Assumptions
+## Assumption 1. Y is continuous
+hist(LANo$log_price)
+```
+```{r}
+## Assumption 2. Errors (ɛ) are normally distributed
+# Since Y is normally distributed, residual would also be normally distributed.
+qqnorm(LANo$log_price, main=" Price LA")
+qqline(LANo$log_price)
+# A large majority of residuals lie on the qqline implying that the residuals are normally distributed except at one end of the tail.
+```
+```{r}
+## Assumption 3. X’s are independent
+#Log-Linear model for each city
+LALogLinearModel <- lm(log_price ~ ., data = LANo)
+summary(LALogLinearModel)
+```
+```{r}
+# Checking for correlation in X variables
+# Condition Index and Variance Inflation factor
+vif(LALogLinearModel)
+# All the vif coefficients are below 10. Therefore there is no significant correlation between the variables.
+```
+```{r}
+## Assumption 4. Y and X’s have linear relationship 
+#Plots
+plot(LALogLinearModel)
+```
+```{r}
+## Assumption 5 & 6. Observations are independent & Errors are independent
+# Durbin-Watson Testfor Serial Correlation
+dwtest(LALogLinearModel)
+# DW test shows there is acceptable level of level of correlation as the value is 1.9876
+```
+```{r}
+## Assumptions 7 & 8. The error average is 0 & The error variance is constant.
+# Breusch-Pagan Test
+bptest(LANo$log_price ~ ., data = LANo)
+# BP test is significant; therefore there is hetroscedasticity in the residuals. Need to run WLS to fix the issue.
+plot(LALogLinearModel, which = 1)
+# However, the plot shows there is not much visual hetroscedasticity. 
+```
+```{r}
+# Drop unused factors
+LANo$property_type <- droplevels(LANo)$property_type
+LANo$host_has_profile_pic <- droplevels(LANo)$host_has_profile_pic
+LANo$host_identity_verified <- droplevels(LANo)$host_identity_verified
+LANo$cancellation_policy <- droplevels(LANo)$cancellation_policy
+
+table(LANo$property_type)
+# Combining all the factor that have degree of freedom less than 10
+levels(LANo$property_type)[levels(LANo$property_type)=="Castle"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Boutique hotel"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Cave"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Chalet"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Earth House"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Hut"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Serviced apartment"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="In-law"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Island"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Tipi"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Train"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Treehouse"] <- "Other"
+levels(LANo$property_type)[levels(LANo$property_type)=="Yurt"] <- "Other"
+# levels(LANo$cancellation_policy)[levels(LANo$cancellation_policy)=="super_strict_60"] <- "super_strict_30"
+```
+```{r}
+## OLS model for all cities.
+set.seed(1)
+LA.train <- sample(nrow(LANo), 0.7*nrow(LANo))
+LALogLinearModel <- lm(log_price ~ ., data = LANo[LA.train,])
+summary(LALogLinearModel)
+```
+```{r}
+# Stepwise for OLS Model
+LA.null <- lm(log_price ~ 1, data = LANo[LA.train,])
+LA.full <- lm(log_price ~ ., data = LANo[LA.train,])
+LA.stepwise <- step(LA.full, scope = list(lower = LA.full, upper = LA.full), direction = 'both', test = 'F')
+summary(LA.stepwise)
+```
+```{r}
+LA.reduced <- LANo[, c(
+  'log_price',
+  'property_type',
+  'room_type',
+  'accommodates',
+  'bathrooms',
+  'cancellation_policy',
+  'first_review',
+  'host_response_rate_percent',
+  'host_since',
+  'instant_bookable',
+  'last_review',
+  'number_of_reviews',
+  'bedrooms',
+  'beds'
+)]
+
+# Running OLS with the reduced model with only significant predictors.
+LA.reduced.model <- lm(log_price ~., data = LA.reduced[LA.train,])
+summary(LA.reduced.model)
+```
+```{r}
+LA.reduced.mse <-  mean((LA.reduced$log_price-predict(LA.reduced.model, LA.reduced))[-LA.train]^2)
+print(paste("MSE Reduced OLS = ", LA.reduced.mse), digits=5)
+```
+```{r}
+## k-Fold Cross-Validation (KFCV)
+# Cross-Validation of OLS
+glm.fit <- glm(log_price ~ ., data = LA.reduced)
+cv.10K <- cv.glm(LA.reduced, glm.fit, K=10)
+print(paste("CV MSE OLS = ", cv.10K$delta[1]), digits=5)
+
+```
+```{r}
+# WLS Model
+wts <- 1/fitted(lm(abs(residuals(LALogLinearModel))~fitted(LALogLinearModel)))^2
+LA.wls <- lm(log_price ~ ., data = LANo[LA.train,], weights=1/wts)
+summary(LA.wls)
+```
+```{r}
+MSE.wls <- mean((LANo$log_price-predict(LA.wls, LANo))[-LA.train]^2)
+print(paste("MSE WLS = ", MSE.wls), digits=5)
+```
+```{r}
+# Regression Tree
+tree.LA <- tree(log_price ~ ., data = LANo[LA.train,])
+tree.LA
+summary(tree.LA)
+plot(tree.LA)
+text(tree.LA, pretty = 0)
+# Regression Tree splits the tree based on bedrooms and room_type!!
+tree.LA.pred <- predict(tree.LA, newdata = LANo[-LA.train,])
+mean((tree.LA.pred - LA.reduced$log_price[-LA.train])^2)
+print(paste("MSE Regression Tree = ", mean((tree.LA.pred - LA.reduced$log_price[-LA.train])^2)), digits=5)
+```
